@@ -52,6 +52,8 @@
 
 // GPU header files
 #if USE_GPU
+#include <deal.II/lac/read_write_vector.h>
+#include <deal.II/base/cuda.h>
 #include <deal.II/lac/cuda_vector.h>
 #include <deal.II/matrix_free/cuda_fe_evaluation.h>
 #include <deal.II/matrix_free/cuda_matrix_free.h>
@@ -283,7 +285,7 @@ namespace Step48
     current.evaluate(true, true);
     old.evaluate(true, false);
 
-    current.apply_quad_point_operations(SineGordonOperatorQuad<dim, fe_degree, double, fe_degree+1>(delta_t_sqr));
+    current.apply_quad_point_operations(SineGordonOperatorQuad<dim, fe_degree, fe_degree+1>(delta_t_sqr));
 
     current.integrate(true, true);
     current.distribute_local_to_global(dst);
@@ -715,9 +717,14 @@ namespace Step48
     VectorType solution_gpu(n_dofs), old_solution_gpu(n_dofs), old_old_solution_gpu(n_dofs);
 
     // Convert the vectors to the GPU vector format
-    solution_gpu.import(solution, VectorOperation::insert);
-    old_solution_gpu.import(old_solution, VectorOperation::insert);
-    old_old_solution_gpu.import(old_old_solution, VectorOperation::insert);
+    LinearAlgebra::ReadWriteVector<double> solution_rw(n_dofs), old_solution_rw(n_dofs), old_old_solution_rw(n_dofs);
+    solution_rw.import(solution, VectorOperation::insert);
+    old_solution_rw.import(old_solution, VectorOperation::insert)
+    old_solution_rw.import(old_old_solution, VectorOperation::insert)
+
+    solution_gpu.import(solution_rw, VectorOperation::insert);
+    old_solution_gpu.import(old_solution_rw, VectorOperation::insert);
+    old_old_solution_gpu.import(old_old_solution_rw, VectorOperation::insert);
 
     std::vector<VectorType *>
       previous_solutions;
@@ -731,19 +738,6 @@ namespace Step48
     previous_solutions.push_back(&old_old_solution);
     #endif
 
-    // For GPU, need to convert to the GPU vector format
-    #if USE_GPU
-    // I think I need to use a ReadWriteVector as an intermediate
-    LinearAlgebra::ReadWriteVector<Number> solution_rw(n_dofs), old_solution_rw(n_dofs), old_old_solution_rw(n_dofs);
-    solution_rw.import(solution, VectorOperation::insert);
-    old_solution_rw.import(old_solution, VectorOperation::insert)
-    old_solution_rw.import(old_old_solution, VectorOperation::insert)
-
-    solution_gpu.import(solution_rw, VectorOperation::insert);
-    old_solution_gpu.import(old_solution_rw, VectorOperation::insert);
-    old_old_solution_gpu.import(old_old_solution_rw, VectorOperation::insert);
-    #endif
-
     for (time += time_step; time <= final_time;
          time += time_step, ++timestep_number)
       {
@@ -755,7 +749,7 @@ namespace Step48
         old_old_solution_gpu = old_solution_gpu;
         old_solution_gpu = solution_gpu;
 
-        sine_gordon_op.apply(solution_gpu, previous_solutions_gpu);
+        sine_gordon_op.apply(solution_gpu, previous_solutions);
         #else
         old_old_solution.swap(old_solution);
         old_solution.swap(solution);
@@ -773,9 +767,10 @@ namespace Step48
       }
 
     #if USE_GPU
-    cudaDeviceSynchronize()
+    cudaDeviceSynchronize();
     // Convert the final solution back to an ordinary vector
-    solution.import(solution_gpu, VectorOperation::insert);
+    solution_rw.import(solution_gpu, VectorOperation::insert);
+    solution.import(solution_rw, VectorOperation::insert);
     #endif
 
     timer.restart();
