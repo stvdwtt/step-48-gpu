@@ -87,6 +87,45 @@ namespace Step48
   const unsigned int fe_degree = DEGREE;
 
 
+  #if USE_GPU
+  // Functor to perform the quadruature point operations for the SineGordonOperator
+
+  template <int dim, int fe_degree, int n_q_points_1d>
+  class SineGordonOperatorQuad
+  {
+  public:
+    __device__
+    SineGordonOperatorQuad(VectorizedArray<double> delta_t_sqr) : delta_t_sqr(delta_t_sqr)
+    {}
+
+    __device__ void operator()(
+      CUDAWrappers::FEEvaluation<dim, fe_degree, n_q_points_1d, 1, double>
+        *                fe_eval,
+      const unsigned int q_point) const;
+
+  private:
+    VectorizedArray<double> delta_t_sqr;
+  };
+
+  template <int dim, int fe_degree, typename Number, int n_q_points_1d>
+  __device__ void SineGordonOperatorQuad<dim, fe_degree, n_q_points_1d>::
+                    operator()(
+      CUDAWrappers::FEEvaluation<dim, fe_degree, n_q_points_1d, 1, double> *fe_eval,
+      const unsigned int                                                    q) const
+  {
+
+    const VectorizedArray<double> current_value = current.get_value(q);
+    const VectorizedArray<double> old_value     = old.get_value(q);
+
+    current.submit_value(2. * current_value - old_value -
+                           delta_t_sqr * std::sin(current_value),
+                         q);
+    current.submit_gradient(-delta_t_sqr * current.get_gradient(q), q);
+
+  }
+  #endif
+
+
   // @sect3{SineGordonOperation}
 
   // The <code>SineGordonOperation</code> class implements the cell-based
@@ -208,10 +247,37 @@ namespace Step48
   // the terms in the scheme in the loop over the quadrature points. Finally, we
   // integrate the result against the test
   // function and accumulate the result to the global solution vector @p dst.
+  #if USE_GPU
+  template <int dim, int fe_degree>
+  void SineGordonOperation<dim, fe_degree>::local_apply(
+      const unsigned int                                          cell,
+      const typename CUDAWrappers::MatrixFree<dim, Number>::Data *gpu_data,
+      CUDAWrappers::SharedData<dim, Number> *shared_data,
+      const Number *                         src,
+      Number *                               dst) const
+  {
+    const unsigned int pos = CUDAWrappers::local_q_point_id<dim, Number>(
+      cell, gpu_data, n_dofs_1d, n_q_points);
+
+    FEEvaluationType current(cell, gpu_data, shared_data), old(cell, gpu_data, shared_data);
+
+    current.read_dof_values(*src[0]);
+    old.read_dof_values(*src[1]);
+
+    current.evaluate(true, true);
+    old.evaluate(true, false);
+
+    current.apply_quad_point_operations(SineGordonOperatorQuad<dim, fe_degree, double, fe_degree+1>(delta_t_sqr));
+
+    current.integrate(true, true);
+    current.distribute_local_to_global(dst);
+
+  }
+  #else
   template <int dim, int fe_degree>
   void SineGordonOperation<dim, fe_degree>::local_apply(
     const MatrixFreeType &                                          data,
-    LinearAlgebra::distributed::Vector<double> &                     dst,
+    VectorType &                     dst,
     const std::vector<VectorType *> &src,
     const std::pair<unsigned int, unsigned int> &cell_range) const
   {
@@ -243,7 +309,7 @@ namespace Step48
         current.distribute_local_to_global(dst);
       }
   }
-
+  #endif
 
 
   //@sect4{SineGordonOperation::apply}
@@ -337,10 +403,6 @@ namespace Step48
     MatrixFreeType matrix_free_data;
 
     LinearAlgebra::distributed::Vector<double> solution, old_solution, old_old_solution; // Or should these be ReadWriteVectors?
-
-    #if USE_GPU
-    VectorType solution_gpu, old_solution_gpu, old_old_solution_gpu;
-    #endif
 
     const unsigned int n_global_refinements;
     double             time, time_step;
@@ -604,18 +666,6 @@ namespace Step48
                              old_solution);
     output_results(0);
 
-    #if USE_GPU
-    std::vector<VectorType *>
-      previous_solutions;
-    previous_solutions.push_back(&old_solution_gpu);
-    previous_solutions.push_back(&old_old_solution_gpu);
-    #else
-    std::vector<VectorType *>
-      previous_solutions;
-    previous_solutions.push_back(&old_solution);
-    previous_solutions.push_back(&old_old_solution);
-    #endif
-
     SineGordonOperation<dim, fe_degree> sine_gordon_op(matrix_free_data,
                                                        time_step);
 
@@ -643,6 +693,28 @@ namespace Step48
     double wtime       = 0;
     double output_time = 0;
 
+    #if USE_GPU
+    // Initialize the GPU vectors
+    const unsigned int n_dofs = dof.n_dofs();
+    VectorType solution_gpu(n_dofs), old_solution_gpu(n_dofs), old_old_solution_gpu(n_dofs);
+
+    // Convert the vectors to the GPU vector format
+    solution_gpu.import(solution, VectorOperation::insert);
+    solution_old_gpu.import(solution_old, VectorOperation::insert);
+    solution_old_old_gpu.import(solution_old, VectorOperation::insert);
+
+    std::vector<VectorType *>
+      previous_solutions;
+    previous_solutions.push_back(&old_solution_gpu);
+    previous_solutions.push_back(&old_old_solution_gpu);
+
+    #else
+    std::vector<VectorType *>
+      previous_solutions;
+    previous_solutions.push_back(&old_solution);
+    previous_solutions.push_back(&old_old_solution);
+    #endif
+
     // For GPU, need to convert to the GPU vector format
     #if USE_GPU
     solution_gpu.import(solution, VectorOperation::insert);
@@ -656,8 +728,10 @@ namespace Step48
         timer.restart();
 
         #if USE_GPU
-        old_old_solution_gpu.swap(old_solution_gpu);
-        old_solution_gpu.swap(solution_gpu);
+        // The CUDA vectors don't have a swap method, so I'm doing it manually.
+        // Presumably I could improve performance if I reassigned pointers instead of values.
+        old_old_solution_gpu = old_solution_gpu;
+        old_solution_gpu = solution_gpu;
 
         sine_gordon_op.apply(solution_gpu, previous_solutions_gpu);
         #else
@@ -678,6 +752,7 @@ namespace Step48
 
     #if USE_GPU
     cudaDeviceSynchronize()
+    // Convert the final solution back to an ordinary vector
     solution.import(solution_gpu, VectorOperation::insert);
     #endif
 
