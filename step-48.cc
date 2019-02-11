@@ -159,11 +159,20 @@ namespace Step48
     const VectorizedArray<double>              delta_t_sqr;
     VectorType inv_mass_matrix;
 
+    #if USE_GPU
+    void local_apply(
+        const unsigned int                                          cell,
+        const typename CUDAWrappers::MatrixFree<dim, Number>::Data *gpu_data,
+        CUDAWrappers::SharedData<dim, Number> *shared_data,
+        const Number *                         src,
+        Number *                               dst) const;
+    #else
     void local_apply(
       const MatrixFreeType &                                  data,
       VectorType &                     dst,
       const std::vector<VectorType *> &src,
       const std::pair<unsigned int, unsigned int> &cell_range) const;
+    #endif
   };
 
 
@@ -190,6 +199,10 @@ namespace Step48
   {
     VectorizedArray<double> one = make_vectorized_array(1.);
 
+    // -------------------------------------------------------------------------
+    // Need to convert this section to GPU
+    // -------------------------------------------------------------------------
+
     data.initialize_dof_vector(inv_mass_matrix);
 
     FEEvaluationType fe_eval(data);
@@ -211,6 +224,8 @@ namespace Step48
           1. / inv_mass_matrix.local_element(k);
       else
         inv_mass_matrix.local_element(k) = 0;
+
+    // -------------------------------------------------------------------------
   }
 
 
@@ -696,13 +711,13 @@ namespace Step48
 
     #if USE_GPU
     // Initialize the GPU vectors
-    const unsigned int n_dofs = dof.n_dofs();
+    const unsigned int n_dofs = dof_handler.n_dofs();
     VectorType solution_gpu(n_dofs), old_solution_gpu(n_dofs), old_old_solution_gpu(n_dofs);
 
     // Convert the vectors to the GPU vector format
     solution_gpu.import(solution, VectorOperation::insert);
-    solution_old_gpu.import(solution_old, VectorOperation::insert);
-    solution_old_old_gpu.import(solution_old, VectorOperation::insert);
+    old_solution_gpu.import(old_solution, VectorOperation::insert);
+    old_old_solution_gpu.import(old_old_solution, VectorOperation::insert);
 
     std::vector<VectorType *>
       previous_solutions;
@@ -718,9 +733,15 @@ namespace Step48
 
     // For GPU, need to convert to the GPU vector format
     #if USE_GPU
-    solution_gpu.import(solution, VectorOperation::insert);
-    solution_old_gpu.import(solution_old, VectorOperation::insert);
-    solution_old_old_gpu.import(solution_old, VectorOperation::insert);
+    // I think I need to use a ReadWriteVector as an intermediate
+    LinearAlgebra::ReadWriteVector<Number> solution_rw(n_dofs), old_solution_rw(n_dofs), old_old_solution_rw(n_dofs);
+    solution_rw.import(solution, VectorOperation::insert);
+    old_solution_rw.import(old_solution, VectorOperation::insert)
+    old_solution_rw.import(old_old_solution, VectorOperation::insert)
+
+    solution_gpu.import(solution_rw, VectorOperation::insert);
+    old_solution_gpu.import(old_solution_rw, VectorOperation::insert);
+    old_old_solution_gpu.import(old_old_solution_rw, VectorOperation::insert);
     #endif
 
     for (time += time_step; time <= final_time;
