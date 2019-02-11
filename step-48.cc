@@ -52,8 +52,9 @@
 
 // GPU header files
 #if USE_GPU
-#include <deal.II/matrix_free/cuda_matrix_free.h>
 #include <deal.II/lac/cuda_vector.h>
+#include <deal.II/matrix_free/cuda_fe_evaluation.h>
+#include <deal.II/matrix_free/cuda_matrix_free.h>
 #endif
 
 // Changing the dimension and degree to precompiler directives for the typedefs
