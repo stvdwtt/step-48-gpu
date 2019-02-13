@@ -20,7 +20,7 @@
  */
 
 // Flag to switch on or off the GPU versions of the calls
-#define USE_GPU false
+#define USE_GPU true
 
 // The necessary files from the deal.II library.
 #include <deal.II/base/logstream.h>
@@ -52,8 +52,8 @@
 
 // GPU header files
 #if USE_GPU
-#include <deal.II/lac/read_write_vector.h>
 #include <deal.II/base/cuda.h>
+#include <deal.II/lac/read_write_vector.h>
 #include <deal.II/lac/cuda_vector.h>
 #include <deal.II/matrix_free/cuda_fe_evaluation.h>
 #include <deal.II/matrix_free/cuda_matrix_free.h>
@@ -74,6 +74,30 @@ typedef dealii::MatrixFree<DIM, double> MatrixFreeType;
 typedef dealii::FEEvaluation<DIM, DEGREE> FEEvaluationType;
 #endif
 
+#if USE_GPU
+#ifdef DEAL_II_COMPILER_CUDA_AWARE
+// By default, all the ranks will try to access the device 0.
+// If we are running with MPI support it is better to address different graphic
+// cards for different processes even if only one node is used. The choice below
+// is based on the MPI proccess id.
+// MPI needs to be initialized before using this function.
+void
+init_cuda(const bool use_mpi = false)
+{
+	#  ifndef DEAL_II_WITH_MPI
+	Assert(use_mpi == false, ExcInternalError());
+	#  endif
+	const unsigned int my_id =
+      use_mpi ? dealii::Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) : 0;
+	int         n_devices       = 0;
+	cudaError_t cuda_error_code = cudaGetDeviceCount(&n_devices);
+	AssertCuda(cuda_error_code);
+	const int device_id = my_id % n_devices;
+	cuda_error_code     = cudaSetDevice(device_id);
+	AssertCuda(cuda_error_code);
+}
+#endif
+#endif
 
 namespace Step48
 {
@@ -719,8 +743,8 @@ namespace Step48
     // Convert the vectors to the GPU vector format
     LinearAlgebra::ReadWriteVector<double> solution_rw(n_dofs), old_solution_rw(n_dofs), old_old_solution_rw(n_dofs);
     solution_rw.import(solution, VectorOperation::insert);
-    old_solution_rw.import(old_solution, VectorOperation::insert)
-    old_solution_rw.import(old_old_solution, VectorOperation::insert)
+    old_solution_rw.import(old_solution, VectorOperation::insert);
+    old_solution_rw.import(old_old_solution, VectorOperation::insert);
 
     solution_gpu.import(solution_rw, VectorOperation::insert);
     old_solution_gpu.import(old_solution_rw, VectorOperation::insert);
