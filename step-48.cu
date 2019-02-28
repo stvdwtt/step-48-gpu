@@ -77,7 +77,7 @@ typedef dealii::FEEvaluation<DIM, DEGREE> FEEvaluationType;
 #if USE_GPU
 #ifdef DEAL_II_COMPILER_CUDA_AWARE
 // By default, all the ranks will try to access the device 0.
-// If we are running with MPI support it is better to address different graphic
+// If we are running with MPI support it is better to address different graphics
 // cards for different processes even if only one node is used. The choice below
 // is based on the MPI proccess id.
 // MPI needs to be initialized before using this function.
@@ -117,7 +117,7 @@ namespace Step48
   #if USE_GPU
   // Functor to perform the quadruature point operations for the SineGordonOperator
 
-  template <int dim, int fe_degree, int n_q_points_1d>
+  template <int dim, int fe_degree, typename Number, int n_q_points_1d>
   class SineGordonOperatorQuad
   {
   public:
@@ -135,7 +135,7 @@ namespace Step48
   };
 
   template <int dim, int fe_degree, typename Number, int n_q_points_1d>
-  __device__ void SineGordonOperatorQuad<dim, fe_degree, n_q_points_1d>::
+  __device__ void SineGordonOperatorQuad<dim, fe_degree, Number, n_q_points_1d>::
                     operator()(
       CUDAWrappers::FEEvaluation<dim, fe_degree, n_q_points_1d, 1, double> *fe_eval,
       const unsigned int                                                    q) const
@@ -167,7 +167,11 @@ namespace Step48
   // about loop lengths etc., which is essential for efficiency. On the other
   // hand, it makes it more challenging to implement the degree as a run-time
   // parameter.
+  #if USE_GPU
+  template <int dim, typename Number, int fe_degree>
+  #else
   template <int dim, int fe_degree>
+  #endif
   class SineGordonOperation
   {
   public:
@@ -216,8 +220,13 @@ namespace Step48
   // the <code>integrate</code> function with @p true argument at the slot for
   // values. Finally, we invert the diagonal entries since we have to multiply
   // by the inverse mass matrix in each time step.
+  #if USE_GPU
+  template <int dim, typename Number, int fe_degree>
+  SineGordonOperation<dim, Number, fe_degree>::SineGordonOperation(
+  #else
   template <int dim, int fe_degree>
   SineGordonOperation<dim, fe_degree>::SineGordonOperation(
+  #endif
     const MatrixFreeType &data_in,
     const double                   time_step)
     : data(data_in)
@@ -229,6 +238,9 @@ namespace Step48
     // Need to convert this section to GPU
     // -------------------------------------------------------------------------
 
+    #if USE_GPU
+    #warning MatrixFreeType DoF Vector is Uninitialized!
+    #else
     data.initialize_dof_vector(inv_mass_matrix);
 
     FEEvaluationType fe_eval(data);
@@ -250,6 +262,7 @@ namespace Step48
           1. / inv_mass_matrix.local_element(k);
       else
         inv_mass_matrix.local_element(k) = 0;
+    #endif
 
     // -------------------------------------------------------------------------
   }
@@ -290,8 +303,8 @@ namespace Step48
   // integrate the result against the test
   // function and accumulate the result to the global solution vector @p dst.
   #if USE_GPU
-  template <int dim, int fe_degree>
-  void SineGordonOperation<dim, fe_degree>::local_apply(
+  template <int dim, typename Number, int fe_degree>
+  void SineGordonOperation<dim, Number, fe_degree>::local_apply(
       const unsigned int                                          cell,
       const typename CUDAWrappers::MatrixFree<dim, Number>::Data *gpu_data,
       CUDAWrappers::SharedData<dim, Number> *shared_data,
@@ -364,13 +377,25 @@ namespace Step48
   // the <code>local_apply()</code> method of the class
   // <code>SineGordonOperation</code>, i.e., <code>this</code>. One could also
   // provide a function with the same signature that is not part of a class.
+  #if USE_GPU
+  template <int dim, typename Number, int fe_degree>
+  void SineGordonOperation<dim, Number, fe_degree>::apply(
+    VectorType &                     dst,
+    const std::vector<VectorType *> &src) const
+  #else
   template <int dim, int fe_degree>
   void SineGordonOperation<dim, fe_degree>::apply(
     VectorType &                     dst,
     const std::vector<VectorType *> &src) const
+  #endif
   {
     dst = 0;
-    data.cell_loop(&SineGordonOperation<dim, fe_degree>::local_apply,
+    data.cell_loop(
+                   #if USE_GPU
+                   &SineGordonOperation<dim, Number, fe_degree>::local_apply,
+                   #else
+                   &SineGordonOperation<dim, fe_degree>::local_apply,
+                   #endif
                    this,
                    dst,
                    src);
@@ -470,12 +495,10 @@ namespace Step48
   template <int dim>
   SineGordonProblem<dim>::SineGordonProblem()
     : pcout(std::cout, Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
-    ,
 #ifdef DEAL_II_WITH_P4EST
-    triangulation(MPI_COMM_WORLD)
-    ,
+    , triangulation(MPI_COMM_WORLD)
 #endif
-    fe(QGaussLobatto<1>(fe_degree + 1))
+    , fe(QGaussLobatto<1>(fe_degree + 1))
     , dof_handler(triangulation)
     , n_global_refinements(10 - 2 * dim)
     , time(-10)
@@ -573,9 +596,9 @@ namespace Step48
                             constraints,
                             quadrature,
                             additional_data);
+    matrix_free_data.initialize_dof_vector(solution);
     #endif
 
-    matrix_free_data.initialize_dof_vector(solution);
     old_solution.reinit(solution);
     old_old_solution.reinit(solution);
   }
@@ -708,8 +731,13 @@ namespace Step48
                              old_solution);
     output_results(0);
 
-    SineGordonOperation<dim, fe_degree> sine_gordon_op(matrix_free_data,
-                                                       time_step);
+    #if USE_GPU
+    SineGordonOperation<dim, double, fe_degree>
+    #else
+    SineGordonOperation<dim, fe_degree>
+    #endif
+    sine_gordon_op(matrix_free_data,
+                   time_step);
 
     // Now loop over the time steps. In each iteration, we shift the solution
     // vectors by one and call the <code> apply </code> function of the <code>
